@@ -2,9 +2,9 @@
 pragma solidity ^0.8.19;
 
 import "forge-std/Test.sol";
-import "../src/DexCore.sol";
+import "../src/DexManager.sol";
 
-contract DexCoreTest is Test {
+contract DexManagerTest is Test {
     DexCore public core;
 
     function setUp() public {

@@ -4,6 +4,8 @@ pragma solidity ^0.8.19;
 import "./DexToken.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
+import "prb-math/SD59x18.sol";
+
 //import safetransfer
 
 contract DexPool is ERC4626 {
@@ -13,6 +15,7 @@ contract DexPool is ERC4626 {
 
     /// question: should these be IERC20 typecast?
     /// question: can we set the decimal point here, for the vault token
+    /// only a dex pool manager should be able to start a pool
     constructor(IERC20 _token0, IERC20 _token1, uint256 amount0, uint256 amount1) {
         require((amount0 > 0) && (amount1 > 0), "cannot create an empty pool");
         token0 = _token0;
