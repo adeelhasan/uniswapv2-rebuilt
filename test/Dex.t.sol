@@ -110,10 +110,25 @@ contract DexTest is Test {
         require(tokenB.balanceOf(account1) == 50 ether, "balance not as expected");
     }
 
-
-
-
     function testSwapping(uint256 x) public {
+        vm.startPrank(account1);
+        tokenA.approve(address(pool), 5 ether);
+        tokenB.approve(address(pool), 20 ether);
+        pool.depositPair(5 ether, 20 ether);
+        vm.stopPrank();
 
+        uint256 balanceBefore = tokenB.balanceOf(account2);
+        //send in tokenA, get tokenB in return
+        vm.startPrank(account2);
+        tokenA.approve(address(pool), 1 ether);
+        pool.swap(0.001 ether, true);
+        //require(tokenB.balanceOf(account2))
+
+        vm.stopPrank();
+
+        uint256 amountReduced = 20 ether - (tokenB.balanceOf(address(pool)));
+        uint256 amountGained = tokenB.balanceOf(account2) - balanceBefore;
+
+        require(amountReduced == amountGained, "accounting doesnt line up");
     }
 }

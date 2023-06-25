@@ -62,10 +62,11 @@ contract DexPool is ERC4626 {
         //console.log(lpQuantity.intoUint256());
         _mint(msg.sender, lpQuantity.intoUint256());
 
-        //_reserve0.add()
-
         //update reserves
-        
+        _reserve0 = _reserve0.add(ud(IERC20(token0).balanceOf(address(this))));
+        _reserve1 = _reserve1.add(ud(IERC20(token1).balanceOf(address(this))));
+
+       
     }
 
     /// @notice this will burn shares and then transfer assets (tokenA & tokenB) back
@@ -76,14 +77,14 @@ contract DexPool is ERC4626 {
         //this will burn the lp tokens
         super.redeem(shares, address(this), msg.sender);
 
-        _reserve0 = ud(IERC20(token0).balanceOf(address(this)));
-        _reserve1 = ud(IERC20(token1).balanceOf(address(this)));
-
         uint256 token0Return = _reserve0.mul(percentageOwnership).intoUint256();
         uint256 token1Return = _reserve1.mul(percentageOwnership).intoUint256();
 
         IERC20(token0).transfer(msg.sender, token0Return);
         IERC20(token1).transfer(msg.sender, token1Return);
+
+        _reserve0 = _reserve0.sub(ud(token0Return));
+        _reserve1 = _reserve1.sub(ud(token1Return));
     }
 
     function _convertToAssets(uint256 shares, Math.Rounding) internal view override returns (uint256) {
@@ -113,42 +114,49 @@ contract DexPool is ERC4626 {
         liquidityAmount = (ud(amount0).mul(ud(amount1))).sqrt();
     }
 
-    //msg.sender has token0, convert to token1 and return
-    //if useToken0 is false, then convert from token1 to token0
-    //subject to Fee, we get the Fee from the "Manager" contract
-    // transfer the tokens first, and then call swap ...
-    function swap(uint256 amount, bool useToken0) external pure {
-        
+    /// @dev msg.sender would have approved the amount for transfer
+    /// and will be recipient of the swapped token as well
+    /// @param amount qty of token coming in
+    /// @param useToken0 if useToken0 is true, then token0 is received and token1 given back
+    /// and vice versa
+    function swap(uint256 amount, bool useToken0) external {
+        UD60x18 swappedAmount = _calculateSwap(amount, useToken0);
+        if (useToken0) {
+            require(swappedAmount <= _reserve1, "insufficent reserves");
+            _reserve0 = _reserve0.add(ud(amount));
+            _reserve1 = _reserve1.sub(swappedAmount);
+
+            IERC20(token0).transferFrom(msg.sender, address(this), amount);
+            IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
+        }
+        else {
+            require(swappedAmount <= _reserve0, "insufficent reserves");
+            _reserve1 = _reserve1.add(ud(amount));
+            _reserve0 = _reserve0.sub(swappedAmount);
+
+            IERC20(token1).transferFrom(msg.sender, address(this), amount);
+            IERC20(token0).transfer(msg.sender, swappedAmount.intoUint256());
+        }
+
     }
 
     /// @notice returns the liquidity that will come, as a simulation
-    function previewSwap(uint256 token0Amount) external pure returns (uint256 token1Amount) {
-        return _calculateSwap(token0Amount);
+    function previewSwap(uint256 amount, bool useToken0) external returns (UD60x18 swappedAmount) {
+        return _calculateSwap(amount, useToken0);
     }
 
     /// @notice how much of token1 will we get for a given token0 amount
     /// @dev factors in the protocol fee
-    function _calculateSwap(uint256 token0Amount) internal pure returns(uint256) {
-        return token0Amount;
+    function _calculateSwap(uint256 amount, bool useToken0) internal returns(UD60x18 swappedAmount) {
+        //.sub(ud(amount).mul(3).div(1000)));
+        UD60x18 amountAdjustedForFee = ud(amount).sub(ud(amount).mul(ud(3)).div(ud(1000)));
+
+        //calcuate so that the product would remain same
+        UD60x18 existingK = _reserve0.mul(_reserve1);
+        if (useToken0)
+            swappedAmount = _reserve1.sub(existingK.div(amountAdjustedForFee.add(_reserve0)));
+        else
+            swappedAmount = existingK.div(amountAdjustedForFee.add(_reserve1));
     }
 
 }
-
-
-/*
-    //constructor(IERC20 _token0, IERC20 _token1, uint256 amount0, uint256 amount1) ERC4626(_token0.name(), _token1.symbol()) {
-        struct TokenInfo {
-            string name;
-            string symbol;
-            IERC20 token;
-            uint256 amount;
-        }
-        
-        contract DexPoolLiquidityToken is ERC4626 {
-        
-            constructor(ERC20 underlying, string memory name, string memory symbol) ERC4626(underlying) ERC20(name, symbol) {
-        
-            }
-        
-        }
-*/
