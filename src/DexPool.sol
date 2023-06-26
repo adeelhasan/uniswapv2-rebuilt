@@ -5,6 +5,7 @@ import "forge-std/console.sol";
 import "./DexToken.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
+import "openzeppelin-contracts/interfaces/IERC3156FlashLender.sol";
 import { UD60x18, ud } from "prb-math/UD60x18.sol";
 
 //import safetransfer
@@ -14,13 +15,15 @@ import { UD60x18, ud } from "prb-math/UD60x18.sol";
 //for a pair A, B -- is the swap always from A to B? what about from B to A? should be both ways
 //or can both happen at the same time?
 
-contract DexPool is ERC4626 {
+contract DexPool is ERC4626, IERC3156FlashLender {
 
     UD60x18 private _reserve0;
     UD60x18 private _reserve1;
     address public immutable token0;
     address public immutable token1;
     address public immutable dex;
+
+    error NotPoolToken();
 
     /// only a dex pool manager should be able to start a pool
     /// the only way to restrict is really to see the address and compare to a hardcoded one
@@ -65,8 +68,6 @@ contract DexPool is ERC4626 {
         //update reserves
         _reserve0 = _reserve0.add(ud(IERC20(token0).balanceOf(address(this))));
         _reserve1 = _reserve1.add(ud(IERC20(token1).balanceOf(address(this))));
-
-       
     }
 
     /// @notice this will burn shares and then transfer assets (tokenA & tokenB) back
@@ -158,5 +159,45 @@ contract DexPool is ERC4626 {
         else
             swappedAmount = existingK.div(amountAdjustedForFee.add(_reserve1));
     }
+
+    /************ flash loan implementation ************/
+
+     /// @dev The fee to be charged for a given loan: in this case 3%
+     /// @param token The loan currency.
+     /// @param amount The amount of tokens lent.
+     /// @return The amount of `token` to be charged for the loan, on top of the returned principal.
+    function flashFee(address token, uint256 amount) external override view returns (uint256) {
+        if (token1 != token || token0 != token)
+            revert NotPoolToken();
+        
+        return ud(amount).mul(ud(3)).div(ud(1000)).intoUint256();
+    }
+
+     /// @dev The amount of currency available to be lended.
+     /// @param token The loan currency.
+     /// @return The amount of `token` that can be borrowed.
+    function maxFlashLoan(address token) external override view returns (uint256) {
+        if (token == token0)
+            return _reserve0.intoUint256();
+        else if (token == token1)
+            return _reserve1.intoUint256();
+        else
+            revert NotPoolToken();
+    }
+
+     /// @dev Initiate a flash loan.
+     /// @param receiver The receiver of the tokens in the loan, and the receiver of the callback.
+     /// @param token The loan currency.
+     /// @param amount The amount of tokens lent.
+     /// @param data Arbitrary data structure, intended to contain user-defined parameters.
+    function flashLoan(
+        IERC3156FlashBorrower receiver,
+        address token,
+        uint256 amount,
+        bytes calldata data
+    ) external returns (bool) {
+
+    }
+
 
 }
