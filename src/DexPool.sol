@@ -6,29 +6,41 @@ import "./DexToken.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
 import "openzeppelin-contracts/interfaces/IERC3156FlashLender.sol";
-import { UD60x18, ud } from "prb-math/UD60x18.sol";
+import {UD60x18, ud} from "prb-math/UD60x18.sol";
 
-//import safetransfer
-//is the fee kept here, or in the main dex contract
-//is the fee always in TokenA terms? 
-//fee comes out from the amount being swapped -- which is reduced
-//for a pair A, B -- is the swap always from A to B? what about from B to A? should be both ways
-//or can both happen at the same time?
+//TBD: placeholder asset for ERC4626, or not descend from it to begin with?
+//TBD: safetransfer
+//TBD: flashSwap
+//TBD: fee tracked correctly, in either token
+//TBD: reflect state changes in events
+//Q: how is the data supported ... important in the flash loan as well
+//TBD: support for sending in more when depositing, the penalty
 
 contract DexPool is ERC4626, IERC3156FlashLender {
-
-    UD60x18 private _reserve0;
-    UD60x18 private _reserve1;
     address public immutable token0;
     address public immutable token1;
     address public immutable dex;
 
+    UD60x18 private _reserve0;
+    UD60x18 private _reserve1;
+    UD60x18 private _balances0;
+    UD60x18 private _balances1;
+
+    error InsufficientAllowance(bool token0);
     error NotPoolToken();
+    error ZeroAddressNotAllowed();
+    error TokensCannotBeSame();
 
     /// only a dex pool manager should be able to start a pool
     /// the only way to restrict is really to see the address and compare to a hardcoded one
-    constructor(address _token0, address _token1, string memory lpName, string memory lpSymbol) ERC4626(IERC20(_token0)) ERC20(lpName, lpSymbol) {
-        //require((amount0 > 0) && (amount1 > 0), "cannot create an empty pool");
+    constructor(address _token0, address _token1, string memory lpName, string memory lpSymbol)
+        ERC4626(IERC20(_token0))
+        ERC20(lpName, lpSymbol)
+    {
+        if (_token0 == address(0) || _token1 == address(0))
+            revert ZeroAddressNotAllowed();
+        if (_token0 == _token1)
+            revert TokensCannotBeSame();
         token0 = _token0;
         token1 = _token1;
         dex = msg.sender;
@@ -37,17 +49,19 @@ contract DexPool is ERC4626, IERC3156FlashLender {
         //string memory liquidityTokenString = string.concat(_token0.symbol(), _token1.symbol());
         //liquidityToken = new DexPoolLiquidityToken(_token0, liquidityTokenName, liquidityTokenString);
 
-        
-
         //transfer ... can the other internal function be called as well?
     }
 
     /// @notice add liquidity by depositing tokens in prevailing ratio
-    /// @dev these tokens should have been approved for allowance in the amounts    
+    /// @dev these tokens should have been approved for allowance in the amounts
     function depositPair(uint256 amount0, uint256 amount1) external {
         //check approval
-        require(amount0 <= IERC20(token0).allowance(msg.sender, address(this)), "insufficient allowance for 0");
-        require(amount1 <= IERC20(token1).allowance(msg.sender, address(this)), "insufficient allowance for 1");
+        if (amount0 > IERC20(token0).allowance(msg.sender, address(this))) {
+            revert InsufficientAllowance(true);
+        }
+        if (amount1 > IERC20(token1).allowance(msg.sender, address(this))) {
+            revert InsufficientAllowance(false);
+        }
 
         /// TBD
         /// check if ratio is preserved
@@ -88,10 +102,6 @@ contract DexPool is ERC4626, IERC3156FlashLender {
         _reserve1 = _reserve1.sub(ud(token1Return));
     }
 
-    function _convertToAssets(uint256 shares, Math.Rounding) internal view override returns (uint256) {
-        return 0;
-    }
-
     function previewDeposit(uint256 amount0, uint256 amount1) external pure returns (uint256) {
         return _calculateLiquidity(amount0, amount1).intoUint256();
     }
@@ -106,12 +116,11 @@ contract DexPool is ERC4626, IERC3156FlashLender {
 
             require(currentConstant == incomingConstant, "ratio of amounts not consistent");
         }
-
     }
 
-    /// @dev square root of token A amount * token B amount
+    /// @notice how many liquidity tokens should be issued for a given deposit
+    /// @dev geometric mean, which is square root of token A amount * token B amount
     function _calculateLiquidity(uint256 amount0, uint256 amount1) internal pure returns (UD60x18 liquidityAmount) {
-
         liquidityAmount = (ud(amount0).mul(ud(amount1))).sqrt();
     }
 
@@ -129,8 +138,7 @@ contract DexPool is ERC4626, IERC3156FlashLender {
 
             IERC20(token0).transferFrom(msg.sender, address(this), amount);
             IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
-        }
-        else {
+        } else {
             require(swappedAmount <= _reserve0, "insufficent reserves");
             _reserve1 = _reserve1.add(ud(amount));
             _reserve0 = _reserve0.sub(swappedAmount);
@@ -138,7 +146,6 @@ contract DexPool is ERC4626, IERC3156FlashLender {
             IERC20(token1).transferFrom(msg.sender, address(this), amount);
             IERC20(token0).transfer(msg.sender, swappedAmount.intoUint256());
         }
-
     }
 
     /// @notice returns the liquidity that will come, as a simulation
@@ -148,56 +155,67 @@ contract DexPool is ERC4626, IERC3156FlashLender {
 
     /// @notice how much of token1 will we get for a given token0 amount
     /// @dev factors in the protocol fee
-    function _calculateSwap(uint256 amount, bool useToken0) internal returns(UD60x18 swappedAmount) {
+    function _calculateSwap(uint256 amount, bool useToken0) internal returns (UD60x18 swappedAmount) {
         //.sub(ud(amount).mul(3).div(1000)));
         UD60x18 amountAdjustedForFee = ud(amount).sub(ud(amount).mul(ud(3)).div(ud(1000)));
 
         //calcuate so that the product would remain same
         UD60x18 existingK = _reserve0.mul(_reserve1);
-        if (useToken0)
+        if (useToken0) {
             swappedAmount = _reserve1.sub(existingK.div(amountAdjustedForFee.add(_reserve0)));
-        else
+        } else {
             swappedAmount = existingK.div(amountAdjustedForFee.add(_reserve1));
+        }
     }
 
-    /************ flash loan implementation ************/
+    /**
+     * ERC4626 related
+     */
 
-     /// @dev The fee to be charged for a given loan: in this case 3%
-     /// @param token The loan currency.
-     /// @param amount The amount of tokens lent.
-     /// @return The amount of `token` to be charged for the loan, on top of the returned principal.
-    function flashFee(address token, uint256 amount) external override view returns (uint256) {
-        if (token1 != token || token0 != token)
+    /// @notice this is hardwired to return 0
+    function _convertToAssets(uint256 shares, Math.Rounding) internal view override returns (uint256) {
+        return 0;
+    }
+
+    /// TBD: when lp tokens are returned, this acts as conversion to assets?
+
+    /**
+     * flash loan support
+     */
+
+    /// @dev as per whitepaper, same fee as for trading ie. 0.3%
+    /// @param token The loan currency.
+    /// @param amount The amount of tokens lent.
+    /// @return The amount of `token` to be charged for the loan, on top of the returned principal.
+    function flashFee(address token, uint256 amount) external view override returns (uint256) {
+        if (token1 != token || token0 != token) {
             revert NotPoolToken();
-        
+        }
+
         return ud(amount).mul(ud(3)).div(ud(1000)).intoUint256();
     }
 
-     /// @dev The amount of currency available to be lended.
-     /// @param token The loan currency.
-     /// @return The amount of `token` that can be borrowed.
-    function maxFlashLoan(address token) external override view returns (uint256) {
-        if (token == token0)
+    /// @notice The amount of currency available to be lended.
+    /// @dev does not factor in fees
+    /// @param token The loan currency.
+    /// @return The amount of `token` that can be borrowed.
+    function maxFlashLoan(address token) external view override returns (uint256) {
+        if (token == token0) {
             return _reserve0.intoUint256();
-        else if (token == token1)
+        } else if (token == token1) {
             return _reserve1.intoUint256();
-        else
+        } else {
             revert NotPoolToken();
+        }
     }
 
-     /// @dev Initiate a flash loan.
-     /// @param receiver The receiver of the tokens in the loan, and the receiver of the callback.
-     /// @param token The loan currency.
-     /// @param amount The amount of tokens lent.
-     /// @param data Arbitrary data structure, intended to contain user-defined parameters.
-    function flashLoan(
-        IERC3156FlashBorrower receiver,
-        address token,
-        uint256 amount,
-        bytes calldata data
-    ) external returns (bool) {
-
-    }
-
-
+    /// @dev Initiate a flash loan.
+    /// @param receiver The receiver of the tokens in the loan, and the receiver of the callback.
+    /// @param token The loan currency.
+    /// @param amount The amount of tokens lent.
+    /// @param data Arbitrary data structure, intended to contain user-defined parameters.
+    function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
+        external
+        returns (bool)
+    {}
 }

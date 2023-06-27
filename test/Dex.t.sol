@@ -25,7 +25,6 @@ contract DexTest is Test {
     DexPool public pool;
 
     function setUp() public {
-
         dex = new DexManager(300);
         tokenA = new TokenWithSupply("TokenA", "TA", 1000 ether);
         tokenB = new TokenWithSupply("TokenB", "TB", 1000 ether);
@@ -102,7 +101,7 @@ contract DexTest is Test {
 
         // uint256 balanceBeforeA = tokenA.balanceOf(account1);
         // uint256 balanceBeforeB = tokenB.balanceOf(account1);
-        
+
         pool.redeem(poolBalanceForAccount1, account1, account1);
         vm.stopPrank();
 
