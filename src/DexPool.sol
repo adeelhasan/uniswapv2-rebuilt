@@ -177,6 +177,12 @@ contract DexPool is ERC4626, IERC3156FlashLender {
         return 0;
     }
 
+    /// @notice this increases the precision of the underlying shares
+    /// the idea is to make inflation attacks more expensive
+    function _decimalsOffset() internal view override returns (uint8) {
+        return 18;
+    }
+
     /// TBD: when lp tokens are returned, this acts as conversion to assets?
 
     /**
