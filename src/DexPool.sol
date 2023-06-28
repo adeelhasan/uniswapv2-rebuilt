@@ -6,20 +6,23 @@ import "./DexToken.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
 import "openzeppelin-contracts/interfaces/IERC3156FlashLender.sol";
+import "openzeppelin-contracts/security/ReentrancyGuard.sol";
 import {UD60x18, ud} from "prb-math/UD60x18.sol";
+//import "solmate/utils/SafeTransferLib.sol";
 
-//TBD: placeholder asset for ERC4626, or not descend from it to begin with?
 //TBD: safetransfer
 //TBD: flashSwap
-//TBD: fee tracked correctly, in either token
 //TBD: reflect state changes in events
 //Q: how is the data supported ... important in the flash loan as well
 //TBD: support for sending in more when depositing, the penalty
+//TBD: how to address concerns of front running
 
-contract DexPool is ERC4626, IERC3156FlashLender {
+contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     address public immutable token0;
     address public immutable token1;
     address public immutable dex;
+
+    bytes32 public constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     UD60x18 private _reserve0;
     UD60x18 private _reserve1;
@@ -30,6 +33,8 @@ contract DexPool is ERC4626, IERC3156FlashLender {
     error NotPoolToken();
     error ZeroAddressNotAllowed();
     error TokensCannotBeSame();
+    error FlashLoanAmountTooMuch(uint256 maxLoanAmount);
+    error FlashLoanCallbackFailed();
 
     /// only a dex pool manager should be able to start a pool
     /// the only way to restrict is really to see the address and compare to a hardcoded one
@@ -193,7 +198,7 @@ contract DexPool is ERC4626, IERC3156FlashLender {
     /// @param token The loan currency.
     /// @param amount The amount of tokens lent.
     /// @return The amount of `token` to be charged for the loan, on top of the returned principal.
-    function flashFee(address token, uint256 amount) external view override returns (uint256) {
+    function flashFee(address token, uint256 amount) public view override returns (uint256) {
         if (token1 != token || token0 != token) {
             revert NotPoolToken();
         }
@@ -222,6 +227,77 @@ contract DexPool is ERC4626, IERC3156FlashLender {
     /// @param data Arbitrary data structure, intended to contain user-defined parameters.
     function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
         external
+        nonReentrant
         returns (bool)
-    {}
+    {
+        uint256 amountAvailableToLend;
+        address tokenToLend;
+        if (token == token0) {
+            amountAvailableToLend = _reserve0.intoUint256();
+            tokenToLend = token0;
+        } else if (token == token1) {
+            amountAvailableToLend = _reserve1.intoUint256();
+            tokenToLend = token1;
+        } else {
+            revert NotPoolToken();
+        }
+
+        if (amountAvailableToLend < amount)
+            revert FlashLoanAmountTooMuch(amountAvailableToLend);
+
+        if (token == token0)
+            _reserve0 = _reserve0.sub(ud(amount));
+        else if (token == token1)
+            _reserve1 = _reserve1.sub(ud(amount));
+
+        safeTransferFrom(ERC20(tokenToLend), address(this), address(receiver), amount);
+
+        uint256 fee = flashFee(token, amount);
+        if (receiver.onFlashLoan(msg.sender, tokenToLend, amount, fee, data) != CALLBACK_SUCCESS)
+            revert FlashLoanCallbackFailed();
+        
+        safeTransferFrom(ERC20(tokenToLend), address(receiver),  address(this), amount + fee);
+        if (token == token0)
+           _reserve0 = _reserve0.add(ud(fee));
+        else if (token == token1)
+            _reserve1 = _reserve1.add(ud(fee));
+        
+        return true;        
+    }
+
+    /// @notice this is copied from Solmat because a direct reference was causing a reference collision
+    /// ERC29 class was defined in both the OZ and Solmate tree
+    function safeTransferFrom(
+        ERC20 token,
+        address from,
+        address to,
+        uint256 amount
+    ) internal {
+        bool success;
+
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Get a pointer to some free memory.
+            let freeMemoryPointer := mload(0x40)
+
+            // Write the abi-encoded calldata into memory, beginning with the function selector.
+            mstore(freeMemoryPointer, 0x23b872dd00000000000000000000000000000000000000000000000000000000)
+            mstore(add(freeMemoryPointer, 4), and(from, 0xffffffffffffffffffffffffffffffffffffffff)) // Append and mask the "from" argument.
+            mstore(add(freeMemoryPointer, 36), and(to, 0xffffffffffffffffffffffffffffffffffffffff)) // Append and mask the "to" argument.
+            mstore(add(freeMemoryPointer, 68), amount) // Append the "amount" argument. Masking not required as it's a full 32 byte type.
+
+            success := and(
+                // Set success to whether the call reverted, if not we check it either
+                // returned exactly 1 (can't just be non-zero data), or had no return data.
+                or(and(eq(mload(0), 1), gt(returndatasize(), 31)), iszero(returndatasize())),
+                // We use 100 because the length of our calldata totals up like so: 4 + 32 * 3.
+                // We use 0 and 32 to copy up to 32 bytes of return data into the scratch space.
+                // Counterintuitively, this call must be positioned second to the or() call in the
+                // surrounding and() call or else returndatasize() will be zero during the computation.
+                call(gas(), token, 0, freeMemoryPointer, 100, 0, 32)
+            )
+        }
+
+        require(success, "TRANSFER_FROM_FAILED");
+    }
 }

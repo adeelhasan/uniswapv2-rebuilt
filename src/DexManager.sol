@@ -5,6 +5,8 @@ import "./DexPool.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 //TBD: use create2
+//TBD: tokenA and tokenB need to be ordered the same way to make it predictable
+//TBD: how will we list all pools, need a convenient way
 
 contract DexManager {
     mapping(uint256 => address) public pools;
