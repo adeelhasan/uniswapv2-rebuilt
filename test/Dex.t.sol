@@ -3,9 +3,10 @@ pragma solidity ^0.8.19;
 
 import "forge-std/console.sol";
 import "forge-std/Test.sol";
-import "../src/DexManager.sol";
+import "../src/Dex.sol";
 import "../src/DexPool.sol";
 import "openzeppelin-contracts/token/ERC20/ERC20.sol";
+import "openzeppelin-contracts/interfaces/IERC3156FlashBorrower.sol";
 
 contract TokenWithSupply is ERC20 {
     constructor(string memory _name, string memory _symbol, uint256 initialSupply) ERC20(_name, _symbol) {
@@ -13,8 +14,28 @@ contract TokenWithSupply is ERC20 {
     }
 }
 
+contract FlashLoanBorrower is IERC3156FlashBorrower {
+    address public lender;
+
+    constructor(address _lender) {
+        lender = _lender;
+    }
+
+    function onFlashLoan(address initiator, address token, uint256 amount, uint256 fee, bytes calldata data)
+        external
+        override
+        returns (bytes32)
+    {
+        require(msg.sender == address(lender), "FlashBorrower: Untrusted lender");
+        //require(initiator == address(this), "FlashBorrower: External loan initiator");
+        IERC20(token).approve(lender, amount + fee);
+
+        return keccak256("ERC3156FlashBorrower.onFlashLoan");
+    }
+}
+
 contract DexTest is Test {
-    DexManager public dex;
+    Dex public dex;
 
     ERC20 public tokenA;
     ERC20 public tokenB;
@@ -25,7 +46,7 @@ contract DexTest is Test {
     DexPool public pool;
 
     function setUp() public {
-        dex = new DexManager(300);
+        dex = new Dex(300);
         tokenA = new TokenWithSupply("TokenA", "TA", 1000 ether);
         tokenB = new TokenWithSupply("TokenB", "TB", 1000 ether);
 
@@ -120,7 +141,7 @@ contract DexTest is Test {
         //send in tokenA, get tokenB in return
         vm.startPrank(account2);
         tokenA.approve(address(pool), 1 ether);
-        pool.swap(0.001 ether, true);
+        pool.swap(0.001 ether, true, 0);
         //require(tokenB.balanceOf(account2))
 
         vm.stopPrank();
@@ -129,5 +150,20 @@ contract DexTest is Test {
         uint256 amountGained = tokenB.balanceOf(account2) - balanceBefore;
 
         require(amountReduced == amountGained, "accounting doesnt line up");
+    }
+
+    function testFlashLoan() public {
+        vm.startPrank(account1);
+        tokenA.approve(address(pool), 10 ether);
+        tokenB.approve(address(pool), 20 ether);
+        pool.depositPair(10 ether, 20 ether);
+        vm.stopPrank();
+        vm.startPrank(account3);
+        FlashLoanBorrower borrower = new FlashLoanBorrower(address(pool));
+        uint256 amountToBorrow = 10 ether;
+        uint256 feeAmount = pool.flashFee(address(tokenA), amountToBorrow);
+        tokenA.transfer(address(borrower), feeAmount);
+        pool.flashLoan(borrower, address(tokenA), amountToBorrow, "");
+        vm.stopPrank();
     }
 }

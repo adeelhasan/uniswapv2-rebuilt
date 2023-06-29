@@ -5,26 +5,30 @@ import "./DexPool.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 //TBD: use create2
-//TBD: tokenA and tokenB need to be ordered the same way to make it predictable
 //TBD: how will we list all pools, need a convenient way
 
-contract DexManager {
+contract Dex {
     mapping(uint256 => address) public pools;
     uint256 public fee;
 
     constructor(uint256 _fee) {
-        //set initial values, eg. the fees
         fee = _fee;
     }
 
     /// @notice deploy pool to a deterministic address, based on the token addresses
-    /// this way, we will know if a particular pair is pre-existing
     function startPool(address token0, address token1, string memory lpName, string memory lpSymbol)
         external
         returns (address newPoolAddress)
     {
+        require(token0 != address(0) && token1 != address(0), "tokens cannot be address(0)");
+        require(token0 != token1, "tokens cannot be the same");
         //start a pool, or return existing pool
-        uint256 poolKey = uint256(keccak256(abi.encodePacked(address(token0), address(token1))));
+        uint256 poolKey;
+        if (token0 > token1)
+            poolKey = uint256(keccak256(abi.encodePacked(address(token0), address(token1))));
+        else
+            poolKey = uint256(keccak256(abi.encodePacked(address(token1), address(token0))));
+
         newPoolAddress = pools[poolKey];
 
         if (newPoolAddress == address(0)) {
@@ -32,5 +36,15 @@ contract DexManager {
             pools[poolKey] = address(pool);
             newPoolAddress = address(pool);
         }
+    }
+
+    function getPool(address token0, address token1) external view returns (address poolAddress) {
+        uint256 poolKey;
+        if (token0 > token1)
+            poolKey = uint256(keccak256(abi.encodePacked(address(token0), address(token1))));
+        else
+            poolKey = uint256(keccak256(abi.encodePacked(address(token1), address(token0))));
+
+        poolAddress = pools[poolKey];
     }
 }

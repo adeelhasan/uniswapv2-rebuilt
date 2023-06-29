@@ -2,7 +2,6 @@
 pragma solidity ^0.8.19;
 
 import "forge-std/console.sol";
-import "./DexToken.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import "openzeppelin-contracts/token/ERC20/extensions/ERC4626.sol";
 import "openzeppelin-contracts/interfaces/IERC3156FlashLender.sol";
@@ -10,8 +9,6 @@ import "openzeppelin-contracts/security/ReentrancyGuard.sol";
 import {UD60x18, ud} from "prb-math/UD60x18.sol";
 //import "solmate/utils/SafeTransferLib.sol";
 
-//TBD: safetransfer
-//TBD: flashSwap
 //TBD: reflect state changes in events
 //Q: how is the data supported ... important in the flash loan as well
 //TBD: support for sending in more when depositing, the penalty
@@ -29,32 +26,34 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     UD60x18 private _balances0;
     UD60x18 private _balances1;
 
+    event AssetsDeposited(address indexed from, uint256 liquidityIssued, uint256 amount0, uint256 amount1);
+    event Swapped(address indexed token, uint256 amount);
+    event Redeemed(address indexed to, uint256 liquidityReturned, uint256 amount0, uint256 amount1);
+    event FlashLoanIssued(address indexed borrower, uint256 amount);
+    event FlashLoanReturned(address indexed borrower, address indexed token, uint256 amount);
+
     error InsufficientAllowance(bool token0);
     error NotPoolToken();
     error ZeroAddressNotAllowed();
     error TokensCannotBeSame();
     error FlashLoanAmountTooMuch(uint256 maxLoanAmount);
     error FlashLoanCallbackFailed();
+    error FlashLoanTransferToBorroweFailed();
+    error SwappedAmountLessThanMinimum(uint256 swappedAmount);
 
-    /// only a dex pool manager should be able to start a pool
-    /// the only way to restrict is really to see the address and compare to a hardcoded one
     constructor(address _token0, address _token1, string memory lpName, string memory lpSymbol)
-        ERC4626(IERC20(_token0))
+        ERC4626(new ERC20("Placeholder", "PLH"))
         ERC20(lpName, lpSymbol)
     {
-        if (_token0 == address(0) || _token1 == address(0))
+        if (_token0 == address(0) || _token1 == address(0)) {
             revert ZeroAddressNotAllowed();
-        if (_token0 == _token1)
+        }
+        if (_token0 == _token1) {
             revert TokensCannotBeSame();
+        }
         token0 = _token0;
         token1 = _token1;
         dex = msg.sender;
-
-        //string memory liquidityTokenName = string.concat(_token0.name(), _token1.name());
-        //string memory liquidityTokenString = string.concat(_token0.symbol(), _token1.symbol());
-        //liquidityToken = new DexPoolLiquidityToken(_token0, liquidityTokenName, liquidityTokenString);
-
-        //transfer ... can the other internal function be called as well?
     }
 
     /// @notice add liquidity by depositing tokens in prevailing ratio
@@ -68,25 +67,24 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
             revert InsufficientAllowance(false);
         }
 
-        /// TBD
-        /// check if ratio is preserved
-        /// the ratio is a "at least as existing ratio"
-        //  if extra tokens are sent, they get into the contract's balance
-        //  but corresponding lp tokens are rounded off
-        _checkConstantRatio(ud(amount0), ud(amount1));
+        /// check if ratio is preserved, the ratio is a "at least as existing ratio"
+        if (_reserve0.intoUint256() > 0 && _reserve1.intoUint256() > 0)
+            _checkConstantRatio(ud(amount0), ud(amount1));
 
         //transfer to self
-        IERC20(token0).transferFrom(msg.sender, address(this), amount0);
-        IERC20(token1).transferFrom(msg.sender, address(this), amount1);
+        safeTransferFrom(ERC20(token0), msg.sender, address(this), amount0);
+        safeTransferFrom(ERC20(token1), msg.sender, address(this), amount1);
 
         //issue liquidity tokens from the ERC4626
         UD60x18 lpQuantity = _calculateLiquidity(amount0, amount1);
-        //console.log(lpQuantity.intoUint256());
+
         _mint(msg.sender, lpQuantity.intoUint256());
 
         //update reserves
         _reserve0 = _reserve0.add(ud(IERC20(token0).balanceOf(address(this))));
         _reserve1 = _reserve1.add(ud(IERC20(token1).balanceOf(address(this))));
+
+        emit AssetsDeposited(msg.sender, lpQuantity.intoUint256(), amount0, amount1);
     }
 
     /// @notice this will burn shares and then transfer assets (tokenA & tokenB) back
@@ -100,11 +98,13 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
         uint256 token0Return = _reserve0.mul(percentageOwnership).intoUint256();
         uint256 token1Return = _reserve1.mul(percentageOwnership).intoUint256();
 
+        _reserve0 = _reserve0.sub(ud(token0Return));
+        _reserve1 = _reserve1.sub(ud(token1Return));
+
         IERC20(token0).transfer(msg.sender, token0Return);
         IERC20(token1).transfer(msg.sender, token1Return);
 
-        _reserve0 = _reserve0.sub(ud(token0Return));
-        _reserve1 = _reserve1.sub(ud(token1Return));
+        emit Redeemed(receiver, shares, token0Return, token1Return);
     }
 
     function previewDeposit(uint256 amount0, uint256 amount1) external pure returns (uint256) {
@@ -134,23 +134,29 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     /// @param amount qty of token coming in
     /// @param useToken0 if useToken0 is true, then token0 is received and token1 given back
     /// and vice versa
-    function swap(uint256 amount, bool useToken0) external {
+    function swap(uint256 amount, bool useToken0, uint256 minSwappedAmount) external {
         UD60x18 swappedAmount = _calculateSwap(amount, useToken0);
+        if ((minSwappedAmount > 0) && (swappedAmount < ud(minSwappedAmount)))
+            revert SwappedAmountLessThanMinimum(swappedAmount.intoUint256());
         if (useToken0) {
             require(swappedAmount <= _reserve1, "insufficent reserves");
             _reserve0 = _reserve0.add(ud(amount));
             _reserve1 = _reserve1.sub(swappedAmount);
 
-            IERC20(token0).transferFrom(msg.sender, address(this), amount);
+            safeTransferFrom(ERC20(token0), msg.sender, address(this), amount);
             IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
+
+            emit Swapped(token0, swappedAmount.intoUint256());
         } else {
             require(swappedAmount <= _reserve0, "insufficent reserves");
             _reserve1 = _reserve1.add(ud(amount));
             _reserve0 = _reserve0.sub(swappedAmount);
 
-            IERC20(token1).transferFrom(msg.sender, address(this), amount);
-            IERC20(token0).transfer(msg.sender, swappedAmount.intoUint256());
-        }
+            safeTransferFrom(ERC20(token1), msg.sender, address(this), amount);
+            IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
+
+            emit Swapped(token0, swappedAmount.intoUint256());
+        }        
     }
 
     /// @notice returns the liquidity that will come, as a simulation
@@ -184,6 +190,7 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
 
     /// @notice this increases the precision of the underlying shares
     /// the idea is to make inflation attacks more expensive
+    /// @dev however, since we are hardwiring assets to 0, this makes no difference
     function _decimalsOffset() internal view override returns (uint8) {
         return 18;
     }
@@ -199,7 +206,7 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     /// @param amount The amount of tokens lent.
     /// @return The amount of `token` to be charged for the loan, on top of the returned principal.
     function flashFee(address token, uint256 amount) public view override returns (uint256) {
-        if (token1 != token || token0 != token) {
+        if (token1 != token && token0 != token) {
             revert NotPoolToken();
         }
 
@@ -231,48 +238,49 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
         returns (bool)
     {
         uint256 amountAvailableToLend;
-        address tokenToLend;
         if (token == token0) {
             amountAvailableToLend = _reserve0.intoUint256();
-            tokenToLend = token0;
         } else if (token == token1) {
             amountAvailableToLend = _reserve1.intoUint256();
-            tokenToLend = token1;
         } else {
             revert NotPoolToken();
         }
 
-        if (amountAvailableToLend < amount)
+        if (amountAvailableToLend < amount) {
             revert FlashLoanAmountTooMuch(amountAvailableToLend);
+        }
 
-        if (token == token0)
+        if (token == token0) {
             _reserve0 = _reserve0.sub(ud(amount));
-        else if (token == token1)
+        } else if (token == token1) {
             _reserve1 = _reserve1.sub(ud(amount));
+        }
 
-        safeTransferFrom(ERC20(tokenToLend), address(this), address(receiver), amount);
+        if (!IERC20(token).transfer(address(receiver), amount))
+            revert FlashLoanTransferToBorroweFailed();
 
         uint256 fee = flashFee(token, amount);
-        if (receiver.onFlashLoan(msg.sender, tokenToLend, amount, fee, data) != CALLBACK_SUCCESS)
+        if (receiver.onFlashLoan(msg.sender, token, amount, fee, data) != CALLBACK_SUCCESS) {
             revert FlashLoanCallbackFailed();
-        
-        safeTransferFrom(ERC20(tokenToLend), address(receiver),  address(this), amount + fee);
-        if (token == token0)
-           _reserve0 = _reserve0.add(ud(fee));
-        else if (token == token1)
-            _reserve1 = _reserve1.add(ud(fee));
-        
-        return true;        
+        }
+
+        uint256 totalExpectedBack = amount + fee;
+        safeTransferFrom(ERC20(token), address(receiver), address(this), totalExpectedBack);
+        if (token == token0) {
+            _reserve0 = _reserve0.add(ud(totalExpectedBack));
+        } else if (token == token1) {
+            _reserve1 = 
+            _reserve1.add(ud(totalExpectedBack));
+        }
+
+        emit FlashLoanReturned(address(receiver), token, amount);
+
+        return true;
     }
 
-    /// @notice this is copied from Solmat because a direct reference was causing a reference collision
-    /// ERC29 class was defined in both the OZ and Solmate tree
-    function safeTransferFrom(
-        ERC20 token,
-        address from,
-        address to,
-        uint256 amount
-    ) internal {
+    /// @notice this is copied from Solmate because "ERC20" was in both OZ and Solmate libraries
+    /// is there a way to have namespaces in solidity?
+    function safeTransferFrom(ERC20 token, address from, address to, uint256 amount) internal {
         bool success;
 
         /// @solidity memory-safe-assembly
@@ -286,16 +294,17 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
             mstore(add(freeMemoryPointer, 36), and(to, 0xffffffffffffffffffffffffffffffffffffffff)) // Append and mask the "to" argument.
             mstore(add(freeMemoryPointer, 68), amount) // Append the "amount" argument. Masking not required as it's a full 32 byte type.
 
-            success := and(
-                // Set success to whether the call reverted, if not we check it either
-                // returned exactly 1 (can't just be non-zero data), or had no return data.
-                or(and(eq(mload(0), 1), gt(returndatasize(), 31)), iszero(returndatasize())),
-                // We use 100 because the length of our calldata totals up like so: 4 + 32 * 3.
-                // We use 0 and 32 to copy up to 32 bytes of return data into the scratch space.
-                // Counterintuitively, this call must be positioned second to the or() call in the
-                // surrounding and() call or else returndatasize() will be zero during the computation.
-                call(gas(), token, 0, freeMemoryPointer, 100, 0, 32)
-            )
+            success :=
+                and(
+                    // Set success to whether the call reverted, if not we check it either
+                    // returned exactly 1 (can't just be non-zero data), or had no return data.
+                    or(and(eq(mload(0), 1), gt(returndatasize(), 31)), iszero(returndatasize())),
+                    // We use 100 because the length of our calldata totals up like so: 4 + 32 * 3.
+                    // We use 0 and 32 to copy up to 32 bytes of return data into the scratch space.
+                    // Counterintuitively, this call must be positioned second to the or() call in the
+                    // surrounding and() call or else returndatasize() will be zero during the computation.
+                    call(gas(), token, 0, freeMemoryPointer, 100, 0, 32)
+                )
         }
 
         require(success, "TRANSFER_FROM_FAILED");
