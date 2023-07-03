@@ -127,8 +127,7 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     /// @dev msg.sender would have approved the amount for transfer
     /// and will be recipient of the swapped token as well
     /// @param amount qty of token coming in
-    /// @param useToken0 if useToken0 is true, then token0 is received and token1 given back
-    /// and vice versa
+    /// @param useToken0 if useToken0 is true, then token0 is received and token1 given back and vice versa
     function swap(uint256 amount, bool useToken0, uint256 minSwappedAmount) external {
         UD60x18 swappedAmount = _calculateSwap(amount, useToken0);
         if ((minSwappedAmount > 0) && (swappedAmount < ud(minSwappedAmount)))
