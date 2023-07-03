@@ -18,8 +18,6 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
 
     UD60x18 private _reserve0;
     UD60x18 private _reserve1;
-    UD60x18 private _balances0;
-    UD60x18 private _balances1;
 
     event AssetsDeposited(address indexed from, uint256 liquidityIssued, uint256 amount0, uint256 amount1);
     event Swapped(address indexed token, uint256 amount);
