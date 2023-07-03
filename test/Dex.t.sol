@@ -46,7 +46,7 @@ contract DexTest is Test {
     DexPool public pool;
 
     function setUp() public {
-        dex = new Dex(300);
+        dex = new Dex();
         tokenA = new TokenWithSupply("TokenA", "TA", 1000 ether);
         tokenB = new TokenWithSupply("TokenB", "TB", 1000 ether);
 

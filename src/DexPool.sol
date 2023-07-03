@@ -9,11 +9,6 @@ import "openzeppelin-contracts/security/ReentrancyGuard.sol";
 import {UD60x18, ud} from "prb-math/UD60x18.sol";
 //import "solmate/utils/SafeTransferLib.sol";
 
-//TBD: reflect state changes in events
-//Q: how is the data supported ... important in the flash loan as well
-//TBD: support for sending in more when depositing, the penalty
-//TBD: how to address concerns of front running
-
 contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     address public immutable token0;
     address public immutable token1;
@@ -33,12 +28,13 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     event FlashLoanReturned(address indexed borrower, address indexed token, uint256 amount);
 
     error InsufficientAllowance(bool token0);
+    error InsufficientReserves();
     error NotPoolToken();
     error ZeroAddressNotAllowed();
     error TokensCannotBeSame();
     error FlashLoanAmountTooMuch(uint256 maxLoanAmount);
     error FlashLoanCallbackFailed();
-    error FlashLoanTransferToBorroweFailed();
+    error FlashLoanTransferToBorrowerFailed();
     error SwappedAmountLessThanMinimum(uint256 swappedAmount);
 
     constructor(address _token0, address _token1, string memory lpName, string memory lpSymbol)
@@ -59,7 +55,6 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     /// @notice add liquidity by depositing tokens in prevailing ratio
     /// @dev these tokens should have been approved for allowance in the amounts
     function depositPair(uint256 amount0, uint256 amount1) external {
-        //check approval
         if (amount0 > IERC20(token0).allowance(msg.sender, address(this))) {
             revert InsufficientAllowance(true);
         }
@@ -138,25 +133,33 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
         UD60x18 swappedAmount = _calculateSwap(amount, useToken0);
         if ((minSwappedAmount > 0) && (swappedAmount < ud(minSwappedAmount)))
             revert SwappedAmountLessThanMinimum(swappedAmount.intoUint256());
-        if (useToken0) {
-            require(swappedAmount <= _reserve1, "insufficent reserves");
+        if (useToken0) {    
+            //token0 inbound, token1 outbound
+            if (swappedAmount > _reserve1)
+                revert InsufficientReserves();
             _reserve0 = _reserve0.add(ud(amount));
             _reserve1 = _reserve1.sub(swappedAmount);
 
+            //inbound
             safeTransferFrom(ERC20(token0), msg.sender, address(this), amount);
+            //outbound
             IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
 
             emit Swapped(token0, swappedAmount.intoUint256());
         } else {
-            require(swappedAmount <= _reserve0, "insufficent reserves");
+            //token1 inbound, token0 outbound
+            if (swappedAmount > _reserve0)
+                revert InsufficientReserves();
             _reserve1 = _reserve1.add(ud(amount));
             _reserve0 = _reserve0.sub(swappedAmount);
 
+            //inbound
             safeTransferFrom(ERC20(token1), msg.sender, address(this), amount);
-            IERC20(token1).transfer(msg.sender, swappedAmount.intoUint256());
+            //outbound
+            IERC20(token0).transfer(msg.sender, swappedAmount.intoUint256());
 
-            emit Swapped(token0, swappedAmount.intoUint256());
-        }        
+            emit Swapped(token1, swappedAmount.intoUint256());
+        }
     }
 
     /// @notice returns the liquidity that will come, as a simulation
@@ -180,11 +183,11 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     }
 
     /**
-     * ERC4626 related
+     * ERC4626 overrides
      */
 
     /// @notice this is hardwired to return 0
-    function _convertToAssets(uint256 shares, Math.Rounding) internal view override returns (uint256) {
+    function _convertToAssets(uint256 shares, Math.Rounding) internal pure override returns (uint256) {
         return 0;
     }
 
@@ -194,8 +197,6 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     function _decimalsOffset() internal view override returns (uint8) {
         return 18;
     }
-
-    /// TBD: when lp tokens are returned, this acts as conversion to assets?
 
     /**
      * flash loan support
@@ -257,21 +258,20 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
         }
 
         if (!IERC20(token).transfer(address(receiver), amount))
-            revert FlashLoanTransferToBorroweFailed();
+            revert FlashLoanTransferToBorrowerFailed();
 
         uint256 fee = flashFee(token, amount);
+        uint256 totalExpectedBack = amount + fee;
+
         if (receiver.onFlashLoan(msg.sender, token, amount, fee, data) != CALLBACK_SUCCESS) {
             revert FlashLoanCallbackFailed();
         }
 
-        uint256 totalExpectedBack = amount + fee;
         safeTransferFrom(ERC20(token), address(receiver), address(this), totalExpectedBack);
-        if (token == token0) {
+        if (token == token0)
             _reserve0 = _reserve0.add(ud(totalExpectedBack));
-        } else if (token == token1) {
-            _reserve1 = 
-            _reserve1.add(ud(totalExpectedBack));
-        }
+        else if (token == token1)
+            _reserve1 = _reserve1.add(ud(totalExpectedBack));
 
         emit FlashLoanReturned(address(receiver), token, amount);
 
