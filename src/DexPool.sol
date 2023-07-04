@@ -183,7 +183,8 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
      * ERC4626 overrides
      */
 
-    /// @notice this is hardwired to return 0
+    /// @notice this is hardwired to return 0, and makes the rest of the contract
+    /// play nice in having a pair of assets as the base asset
     function _convertToAssets(uint256 shares, Math.Rounding) internal pure override returns (uint256) {
         return 0;
     }
@@ -192,7 +193,7 @@ contract DexPool is ERC4626, IERC3156FlashLender, ReentrancyGuard {
     /// the idea is to make inflation attacks more expensive
     /// @dev however, since we are hardwiring assets to 0, this makes no difference
     function _decimalsOffset() internal view override returns (uint8) {
-        return 18;
+        return 0;
     }
 
     /**

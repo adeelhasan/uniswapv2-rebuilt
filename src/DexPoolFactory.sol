@@ -4,7 +4,7 @@ pragma solidity ^0.8.19;
 import "./DexPool.sol";
 import "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
-contract Dex {
+contract DexPoolFactory {
     mapping(uint256 => address) public poolsMapping;
     address[] public poolsList;
     uint256 public constant MAX_PAGE_SIZE = 100;

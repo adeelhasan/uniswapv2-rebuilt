@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
-import "forge-std/console.sol";
 import "forge-std/Test.sol";
-import "../src/Dex.sol";
+import "../src/DexPoolFactory.sol";
 import "../src/DexPool.sol";
 import "openzeppelin-contracts/token/ERC20/ERC20.sol";
 import "openzeppelin-contracts/interfaces/IERC3156FlashBorrower.sol";
@@ -35,7 +34,7 @@ contract FlashLoanBorrower is IERC3156FlashBorrower {
 }
 
 contract DexTest is Test {
-    Dex public dex;
+    DexPoolFactory public dex;
 
     ERC20 public tokenA;
     ERC20 public tokenB;
@@ -46,7 +45,7 @@ contract DexTest is Test {
     DexPool public pool;
 
     function setUp() public {
-        dex = new Dex();
+        dex = new DexPoolFactory();
         tokenA = new TokenWithSupply("TokenA", "TA", 1000 ether);
         tokenB = new TokenWithSupply("TokenB", "TB", 1000 ether);
 
